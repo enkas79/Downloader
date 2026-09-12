@@ -1,18 +1,37 @@
 import sys
 import os
 import json
-import datetime
+import subprocess
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QTextEdit, QComboBox, QProgressBar,
     QFileDialog, QMessageBox, QCheckBox, QListWidget, QListWidgetItem,
     QGroupBox, QFormLayout
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QProcess, QUrl, QMimeData
-from PyQt6.QtGui import QDragEnterEvent, QDropEvent
+from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtGui import QDragEnterEvent, QDropEvent, QIcon, QAction
+
+# --- Repository GitHub per il controllo aggiornamenti ---
+GITHUB_REPO = "enkas79/downloader"
+APP_AUTHOR = "enkas79"
 
 
 # --- Funzioni di utilità ---
+
+def get_app_dir():
+    """Restituisce la cartella in cui si trova l'eseguibile/script."""
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def get_current_version():
+    """Legge la versione corrente da version.txt."""
+    version_file = os.path.join(get_app_dir(), "version.txt")
+    try:
+        with open(version_file, "r") as f:
+            return f.read().strip()
+    except FileNotFoundError:
+        return "0.0.0"
+
 
 def get_default_downloads_path():
     """Restituisce il percorso predefinito della cartella Downloads."""
@@ -22,7 +41,6 @@ def get_default_downloads_path():
 def check_yt_dlp_installed():
     """Controlla se yt-dlp è installato e accessibile."""
     try:
-        import subprocess
         result = subprocess.run(["yt-dlp", "--version"], capture_output=True, text=True)
         return result.returncode == 0
     except FileNotFoundError:
@@ -35,8 +53,6 @@ class DownloadThread(QThread):
     progress_signal = pyqtSignal(int, str)  # (percentuale, URL)
     message_signal = pyqtSignal(str)  # Messaggio di log
     finished_signal = pyqtSignal(str, bool)  # (URL, successo)
-    start_process_signal = pyqtSignal(list, str)  # (command, url)
-    cancel_process_signal = pyqtSignal(str)  # url
 
     def __init__(self, url, output_path, format_type, quality, playlist=False, subtitles=False, sub_lang="", cookies_path="", custom_args=""):
         super().__init__()
@@ -50,8 +66,38 @@ class DownloadThread(QThread):
         self.cookies_path = cookies_path
         self.custom_args = custom_args
         self._is_cancelled = False
+        self._process = None
 
     def run(self):
+        command = ["yt-dlp"] + self._build_args()
+
+        try:
+            self._process = subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
+        except OSError as exc:
+            self.message_signal.emit(f"Errore avvio yt-dlp: {exc}")
+            self.finished_signal.emit(self.url, False)
+            return
+
+        for line in self._process.stdout:
+            line = line.strip()
+            if not line:
+                continue
+            if "%" in line:
+                self._emit_progress(line)
+            else:
+                self.message_signal.emit(line)
+
+        self._process.wait()
+        success = (not self._is_cancelled) and self._process.returncode == 0
+        self.finished_signal.emit(self.url, success)
+
+    def _build_args(self):
         command = [
             "-o", f"{self.output_path}/%(title)s.%(ext)s",
             "--format", self._get_format(),
@@ -70,14 +116,14 @@ class DownloadThread(QThread):
         if self.custom_args:
             command.extend(self.custom_args.split())
         command.append(self.url)
+        return command
 
-        # Emetti il segnale per avviare il processo nel thread principale
-        self.start_process_signal.emit(command, self.url)
-
-        # Simula un loop per mantenere il thread attivo
-        while not self._is_cancelled:
-            QApplication.processEvents()
-            self.msleep(100)
+    def _emit_progress(self, line):
+        try:
+            percent = int(float(line.rstrip('%')))
+            self.progress_signal.emit(percent, self.url)
+        except ValueError:
+            pass
 
     def _get_format(self):
         if self.format_type == "Video":
@@ -94,7 +140,31 @@ class DownloadThread(QThread):
 
     def cancel(self):
         self._is_cancelled = True
-        self.cancel_process_signal.emit(self.url)
+        if self._process and self._process.poll() is None:
+            self._process.terminate()
+
+
+# --- Thread per il controllo aggiornamenti ---
+
+class UpdateCheckThread(QThread):
+    result_signal = pyqtSignal(bool, str, str)  # (aggiornamento_disponibile, versione_remota, changelog/errore)
+
+    def run(self):
+        try:
+            import requests
+            response = requests.get(
+                f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest",
+                timeout=5,
+            )
+            response.raise_for_status()
+            data = response.json()
+            remote_version = data.get("tag_name", "").lstrip("v")
+            changelog = data.get("body", "")
+            current_version = get_current_version()
+            is_newer = remote_version and remote_version != current_version
+            self.result_signal.emit(is_newer, remote_version, changelog)
+        except Exception as exc:
+            self.result_signal.emit(False, "", str(exc))
 
 
 # --- Finestra principale ---
@@ -105,6 +175,9 @@ class YTDLPGUI(QMainWindow):
         self.setWindowTitle("YT-DLP Downloader Avanzato")
         self.setGeometry(100, 100, 800, 600)
         self.setAcceptDrops(True)
+        icon_path = os.path.join(get_app_dir(), "downloader.svg")
+        if os.path.exists(icon_path):
+            self.setWindowIcon(QIcon(icon_path))
 
         self.central_widget = QWidget()
         self.setCentralWidget(self.central_widget)
@@ -113,11 +186,13 @@ class YTDLPGUI(QMainWindow):
 
         self.download_queue = []
         self.active_threads = {}
-        self.processes = {}  # {url: (QProcess, DownloadThread)}
         self.history = []
+        self._update_thread = None
 
         self._load_settings()
+        self._create_menu()
         self._create_ui()
+        self._check_updates(manual=False)
 
     def _load_settings(self):
         try:
@@ -139,6 +214,68 @@ class YTDLPGUI(QMainWindow):
         }
         with open("settings.json", "w") as f:
             json.dump(settings, f)
+
+    def _create_menu(self):
+        help_menu = self.menuBar().addMenu("&Aiuto")
+
+        about_action = QAction("Informazioni", self)
+        about_action.triggered.connect(self._show_about)
+        help_menu.addAction(about_action)
+
+        update_action = QAction("Controlla aggiornamenti", self)
+        update_action.triggered.connect(lambda: self._check_updates(manual=True))
+        help_menu.addAction(update_action)
+
+        guide_action = QAction("Guida", self)
+        guide_action.triggered.connect(self._show_guide)
+        help_menu.addAction(guide_action)
+
+    def _show_about(self):
+        QMessageBox.about(
+            self,
+            "Informazioni",
+            f"<b>YT-DLP Downloader Avanzato</b><br>"
+            f"Versione: {get_current_version()}<br>"
+            f"Autore: {APP_AUTHOR}",
+        )
+
+    def _show_guide(self):
+        QMessageBox.information(
+            self,
+            "Guida",
+            "1. Incolla l'URL del video o della playlist (o trascinalo nella finestra).\n"
+            "2. Scegli formato, qualità e le opzioni desiderate.\n"
+            "3. Seleziona la cartella di destinazione.\n"
+            "4. Premi 'Scarica' per aggiungere il download alla coda.\n"
+            "5. Usa 'Annulla tutto' per interrompere i download in corso.",
+        )
+
+    def _check_updates(self, manual=True):
+        if self._update_thread and self._update_thread.isRunning():
+            return
+        self._update_thread = UpdateCheckThread()
+        self._update_thread.result_signal.connect(
+            lambda available, version, info: self._on_update_check_result(available, version, info, manual)
+        )
+        self._update_thread.start()
+
+    def _on_update_check_result(self, available, remote_version, info, manual):
+        if available:
+            reply = QMessageBox.question(
+                self,
+                "Aggiornamento disponibile",
+                f"È disponibile la versione {remote_version} (attuale: {get_current_version()}).\n\n"
+                f"Changelog:\n{info}\n\nAprire la pagina di download?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                import webbrowser
+                webbrowser.open(f"https://github.com/{GITHUB_REPO}/releases/latest")
+        elif manual:
+            if remote_version:
+                QMessageBox.information(self, "Aggiornamenti", "Stai già usando l'ultima versione disponibile.")
+            else:
+                QMessageBox.warning(self, "Aggiornamenti", f"Impossibile verificare gli aggiornamenti.\n{info}")
 
     def _create_ui(self):
         # --- Sezione URL e opzioni ---
@@ -308,72 +445,23 @@ class YTDLPGUI(QMainWindow):
         thread.progress_signal.connect(self._update_progress)
         thread.message_signal.connect(self._update_log)
         thread.finished_signal.connect(self._on_download_finished)
-        thread.start_process_signal.connect(self._start_process)
-        thread.cancel_process_signal.connect(self._cancel_process)
 
         self.active_threads[download["url"]] = thread
         thread.start()
         self.log_output.append(f"Avviato download: {download['url']}")
 
-    def _start_process(self, command, url):
-        process = QProcess()
-        process.setProgram("yt-dlp")
-        process.setArguments(command)
-        process.start()
-
-        # Salva il riferimento al processo e al thread
-        self.processes[url] = (process, self.active_threads[url])
-
-        # Collega i segnali per leggere l'output
-        process.readyReadStandardOutput.connect(lambda: self._read_output(process, url))
-        process.readyReadStandardError.connect(lambda: self._read_error(process, url))
-        process.finished.connect(lambda: self._on_process_finished(url, process))
-
-    def _read_output(self, process, url):
-        output = process.readAllStandardOutput().data().decode()
-        if output:
-            self._parse_progress(output, url)
-
-    def _read_error(self, process, url):
-        error = process.readAllStandardError().data().decode()
-        if error:
-            for line in error.split('\n'):
-                if line.strip():
-                    self._update_log(line.strip())
-
-    def _parse_progress(self, output, url):
-        try:
-            for line in output.split('\n'):
-                if '%' in line:
-                    percent_str = line.strip().rstrip('%')
-                    percent = int(float(percent_str))
-                    self.progress_bar.setValue(percent)
-        except (ValueError, IndexError):
-            pass
-
-    def _on_process_finished(self, url, process):
-        if url in self.processes:
-            thread = self.processes[url][1]
-            if process.exitCode() == 0:
-                self._update_log(f"Download completato: {url}")
-                thread.finished_signal.emit(url, True)
-            else:
-                error = process.readAllStandardError().data().decode()
-                self._update_log(f"Errore: {error}")
-                thread.finished_signal.emit(url, False)
-            del self.processes[url]
-
     def _on_download_finished(self, url, success):
         if url in self.active_threads:
             del self.active_threads[url]
+        if success:
+            self._update_log(f"Download completato: {url}")
+        else:
+            self._update_log(f"Download non riuscito o annullato: {url}")
         self._start_next_download()
 
-    def _cancel_process(self, url):
-        if url in self.processes:
-            process, thread = self.processes[url]
-            process.terminate()
-            process.waitForFinished(1000)
-            del self.processes[url]
+    def _cancel_download(self, url):
+        if url in self.active_threads:
+            self.active_threads[url].cancel()
             self._update_log(f"Download annullato: {url}")
 
     def _update_progress(self, percent, url):
@@ -383,10 +471,8 @@ class YTDLPGUI(QMainWindow):
         self.log_output.append(message)
 
     def _cancel_all_downloads(self):
-        for url in list(self.processes.keys()):
-            self._cancel_process(url)
-        self.active_threads.clear()
-        self.processes.clear()
+        for url in list(self.active_threads.keys()):
+            self._cancel_download(url)
         self.download_queue.clear()
         self.queue_list.clear()
         self.progress_bar.setValue(0)
@@ -401,7 +487,7 @@ class YTDLPGUI(QMainWindow):
 
     def _exit_app(self):
         self._save_settings()
-        if self.active_threads or self.processes:
+        if self.active_threads:
             reply = QMessageBox.question(
                 self,
                 "Download in corso",

@@ -31,6 +31,7 @@ jobs:
   build:
     needs: test
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: windows-latest
@@ -53,18 +54,29 @@ jobs:
       - name: Installa dipendenze Python
         run: |
           pip install -r requirements.txt
-          pip install pyinstaller pillow cairosvg
-      - name: Genera icone da downloader.svg
+          pip install pyinstaller pillow
+      - name: Genera icone da downloader.svg (rendering via PyQt6, senza dipendenze native esterne)
         shell: bash
+        env:
+          QT_QPA_PLATFORM: offscreen
         run: |
           python - <<'PYEOF'
-          import cairosvg
+          from PyQt6.QtCore import Qt
+          from PyQt6.QtGui import QGuiApplication, QImage, QPainter
+          from PyQt6.QtSvg import QSvgRenderer
           from PIL import Image
-          import io
 
-          png_bytes = cairosvg.svg2png(url="downloader.svg", output_width=256, output_height=256)
-          img = Image.open(io.BytesIO(png_bytes)).convert("RGBA")
-          img.save("downloader.png")
+          app = QGuiApplication.instance() or QGuiApplication([])
+          renderer = QSvgRenderer("downloader.svg")
+          size = 256
+          image = QImage(size, size, QImage.Format.Format_ARGB32)
+          image.fill(Qt.GlobalColor.transparent)
+          painter = QPainter(image)
+          renderer.render(painter)
+          painter.end()
+          image.save("downloader.png", "PNG")
+
+          img = Image.open("downloader.png").convert("RGBA")
           img.save("downloader.ico", sizes=[(16, 16), (32, 32), (48, 48), (256, 256)])
           PYEOF
       - name: Genera icona .icns (macOS)

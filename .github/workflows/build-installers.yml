@@ -79,15 +79,15 @@ jobs:
       - name: Build eseguibile (Windows)
         if: runner.os == 'Windows'
         run: |
-          pyinstaller --noconfirm --onefile --windowed --name Downloader --icon downloader.ico --add-data "version.txt;." --add-data "downloader.svg;." src/main.py
+          pyinstaller --noconfirm --onefile --windowed --name Downloader --icon downloader.ico --add-data "version.txt;." --add-data "downloader.svg;." --add-data "src/theme.qss;." src/main.py
       - name: Build eseguibile (macOS)
         if: runner.os == 'macOS'
         run: |
-          pyinstaller --noconfirm --onefile --windowed --name Downloader --icon downloader.icns --add-data "version.txt:." --add-data "downloader.svg:." src/main.py
+          pyinstaller --noconfirm --onefile --windowed --name Downloader --icon downloader.icns --add-data "version.txt:." --add-data "downloader.svg:." --add-data "src/theme.qss:." src/main.py
       - name: Build eseguibile (Linux)
         if: runner.os == 'Linux'
         run: |
-          pyinstaller --noconfirm --onefile --windowed --name Downloader --add-data "version.txt:." --add-data "downloader.svg:." src/main.py
+          pyinstaller --noconfirm --onefile --windowed --name Downloader --add-data "version.txt:." --add-data "downloader.svg:." --add-data "src/theme.qss:." src/main.py
       - name: Copia asset accanto all'eseguibile
         shell: bash
         run: |

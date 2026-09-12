@@ -41,6 +41,17 @@ def get_default_downloads_path():
     return os.path.join(os.path.expanduser("~"), "Downloads")
 
 
+def load_theme(app):
+    """Applica il foglio di stile QSS del tema scuro moderno, se presente."""
+    base_dir = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    theme_path = os.path.join(base_dir, "theme.qss")
+    try:
+        with open(theme_path, "r") as f:
+            app.setStyleSheet(f.read())
+    except FileNotFoundError:
+        pass
+
+
 def check_yt_dlp_installed():
     """Controlla se yt-dlp è installato e accessibile."""
     try:
@@ -185,6 +196,8 @@ class YTDLPGUI(QMainWindow):
         self.central_widget = QWidget()
         self.setCentralWidget(self.central_widget)
         self.layout = QVBoxLayout()
+        self.layout.setContentsMargins(16, 16, 16, 16)
+        self.layout.setSpacing(12)
         self.central_widget.setLayout(self.layout)
 
         self.download_queue = []
@@ -288,6 +301,8 @@ class YTDLPGUI(QMainWindow):
         # --- Sezione URL e opzioni ---
         url_group = QGroupBox("Download")
         url_layout = QFormLayout()
+        url_layout.setSpacing(10)
+        url_layout.setContentsMargins(8, 12, 8, 8)
 
         self.url_input = QLineEdit()
         self.url_input.setPlaceholderText("Inserisci l'URL del video o playlist")
@@ -342,12 +357,15 @@ class YTDLPGUI(QMainWindow):
 
         # --- Pulsanti di azione ---
         buttons_layout = QHBoxLayout()
+        buttons_layout.setSpacing(10)
 
         self.download_button = QPushButton("Scarica")
+        self.download_button.setObjectName("primaryButton")
         self.download_button.clicked.connect(self._add_to_queue)
         buttons_layout.addWidget(self.download_button)
 
         self.cancel_button = QPushButton("Annulla tutto")
+        self.cancel_button.setObjectName("dangerButton")
         self.cancel_button.clicked.connect(self._cancel_all_downloads)
         buttons_layout.addWidget(self.cancel_button)
 
@@ -529,6 +547,7 @@ class YTDLPGUI(QMainWindow):
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
+    load_theme(app)
     window = YTDLPGUI()
     window.show()
     sys.exit(app.exec())

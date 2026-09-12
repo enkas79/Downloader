@@ -19,8 +19,11 @@ APP_AUTHOR = "enkas79"
 # --- Funzioni di utilità ---
 
 def get_app_dir():
-    """Restituisce la cartella in cui si trova l'eseguibile/script."""
-    return os.path.dirname(os.path.abspath(__file__))
+    """Restituisce la root del progetto (cartella che contiene version.txt e downloader.svg)."""
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    if os.path.basename(script_dir) == "src":
+        return os.path.dirname(script_dir)
+    return script_dir
 
 
 def get_current_version():
@@ -196,7 +199,7 @@ class YTDLPGUI(QMainWindow):
 
     def _load_settings(self):
         try:
-            with open("settings.json", "r") as f:
+            with open(self._settings_path(), "r") as f:
                 settings = json.load(f)
                 self.default_output = settings.get("output_path", get_default_downloads_path())
                 self.default_quality = settings.get("quality", "Alta")
@@ -212,8 +215,12 @@ class YTDLPGUI(QMainWindow):
             "quality": self.quality_combo.currentText(),
             "format": self.format_combo.currentText(),
         }
-        with open("settings.json", "w") as f:
+        with open(self._settings_path(), "w") as f:
             json.dump(settings, f)
+
+    @staticmethod
+    def _settings_path():
+        return os.path.join(get_app_dir(), "settings.json")
 
     def _create_menu(self):
         help_menu = self.menuBar().addMenu("&Aiuto")

@@ -1,0 +1,98 @@
+name: Build installers
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "version.txt"
+  workflow_dispatch: {}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Installa dipendenze di sistema per Qt headless
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libxkbcommon0 libxcb-cursor0
+      - name: Installa dipendenze Python
+        run: |
+          pip install -r requirements.txt
+          pip install pytest
+      - name: Esegui test
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: pytest -q
+
+  build:
+    needs: test
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: Downloader-windows
+          - os: macos-latest
+            artifact: Downloader-macos
+          - os: ubuntu-latest
+            artifact: Downloader-linux
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Installa dipendenze di sistema (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libxkbcommon0 libxcb-cursor0
+      - name: Installa dipendenze Python
+        run: |
+          pip install -r requirements.txt
+          pip install pyinstaller pillow cairosvg
+      - name: Genera icone da downloader.svg
+        shell: bash
+        run: |
+          python - <<'PYEOF'
+          import cairosvg
+          from PIL import Image
+          import io
+
+          png_bytes = cairosvg.svg2png(url="downloader.svg", output_width=256, output_height=256)
+          img = Image.open(io.BytesIO(png_bytes)).convert("RGBA")
+          img.save("downloader.png")
+          img.save("downloader.ico", sizes=[(16, 16), (32, 32), (48, 48), (256, 256)])
+          PYEOF
+      - name: Genera icona .icns (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          mkdir icon.iconset
+          sips -z 256 256 downloader.png --out icon.iconset/icon_256x256.png
+          sips -z 128 128 downloader.png --out icon.iconset/icon_128x128.png
+          sips -z 32 32 downloader.png --out icon.iconset/icon_32x32.png
+          sips -z 16 16 downloader.png --out icon.iconset/icon_16x16.png
+          iconutil -c icns icon.iconset -o downloader.icns
+      - name: Build eseguibile (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          pyinstaller --noconfirm --onefile --windowed --name Downloader --icon downloader.ico --add-data "version.txt;." --add-data "downloader.svg;." src/main.py
+      - name: Build eseguibile (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          pyinstaller --noconfirm --onefile --windowed --name Downloader --icon downloader.icns --add-data "version.txt:." --add-data "downloader.svg:." src/main.py
+      - name: Build eseguibile (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          pyinstaller --noconfirm --onefile --windowed --name Downloader --add-data "version.txt:." --add-data "downloader.svg:." src/main.py
+      - name: Copia asset accanto all'eseguibile
+        shell: bash
+        run: |
+          cp version.txt downloader.svg dist/ || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/

@@ -27,6 +27,18 @@ def test_download_thread_format_video_alta(qapp):
     assert "1080" in thread._get_format()
 
 
+def test_is_drm_protected_url_netflix():
+    assert main.is_drm_protected_url("https://www.netflix.com/watch/12345")
+
+
+def test_is_drm_protected_url_amazon_prime():
+    assert main.is_drm_protected_url("https://www.amazon.com/gp/video/detail/abc")
+
+
+def test_is_drm_protected_url_youtube_not_flagged():
+    assert not main.is_drm_protected_url("https://www.youtube.com/watch?v=abc")
+
+
 def test_download_thread_format_audio(qapp):
     thread = main.DownloadThread(
         url="https://example.com/video",

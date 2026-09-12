@@ -52,6 +52,19 @@ def load_theme(app):
         pass
 
 
+# Domini di piattaforme note per usare DRM (Widevine/PlayReady) che yt-dlp
+# non è in grado di decifrare: il download da questi siti non è supportato.
+DRM_PROTECTED_DOMAINS = ["netflix.com", "primevideo.com", "amazon.com/gp/video", "amazon.it/gp/video"]
+
+
+def is_drm_protected_url(url):
+    """Verifica se l'URL appartiene a una piattaforma con DRM non supportata (es. Netflix, Amazon Prime Video)."""
+    lowered = url.lower()
+    if any(domain in lowered for domain in DRM_PROTECTED_DOMAINS):
+        return True
+    return "amazon." in lowered and "primevideo" in lowered
+
+
 def check_yt_dlp_installed():
     """Controlla se yt-dlp è installato e accessibile."""
     try:
@@ -106,6 +119,10 @@ class DownloadThread(QThread):
                 self._emit_progress(line)
             else:
                 self.message_signal.emit(line)
+                if "drm" in line.lower():
+                    self.message_signal.emit(
+                        "⚠️ Contenuto protetto da DRM: yt-dlp non è in grado di scaricarlo."
+                    )
 
         self._process.wait()
         success = (not self._is_cancelled) and self._process.returncode == 0
@@ -419,6 +436,17 @@ class YTDLPGUI(QMainWindow):
         url = self.url_input.text().strip()
         if not url:
             QMessageBox.warning(self, "Errore", "Inserisci un URL valido.")
+            return
+
+        if is_drm_protected_url(url):
+            QMessageBox.warning(
+                self,
+                "Piattaforma non supportata",
+                "Netflix e Amazon Prime Video proteggono i video con DRM "
+                "(Widevine/PlayReady): yt-dlp non può decifrarli, quindi il "
+                "download da queste piattaforme non è supportato.\n\n"
+                "Puoi scaricare da servizi senza DRM come YouTube o RaiPlay.",
+            )
             return
 
         output_path = self.output_input.text().strip()

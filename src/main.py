@@ -1,19 +1,30 @@
-import sys
-import os
 import json
+import os
+import shlex
+import shutil
 import subprocess
+import sys
+from urllib.parse import urlparse
+
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QLabel, QLineEdit, QPushButton, QTextEdit, QComboBox, QProgressBar,
+    QLabel, QLineEdit, QPushButton, QPlainTextEdit, QComboBox, QProgressBar,
     QFileDialog, QMessageBox, QCheckBox, QListWidget, QListWidgetItem,
     QGroupBox, QFormLayout
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtCore import QThread, pyqtSignal
 from PyQt6.QtGui import QDragEnterEvent, QDropEvent, QIcon, QAction
 
 # --- Repository GitHub per il controllo aggiornamenti ---
 GITHUB_REPO = "enkas79/downloader"
 APP_AUTHOR = "enkas79"
+
+# Domini di piattaforme note per usare DRM (Widevine/PlayReady) che yt-dlp
+# non è in grado di decifrare: il download da questi siti non è supportato.
+DRM_PROTECTED_DOMAINS = [
+    "netflix.com",
+    "primevideo.com",
+]
 
 
 # --- Funzioni di utilità ---
@@ -24,6 +35,18 @@ def get_app_dir():
     if os.path.basename(script_dir) == "src":
         return os.path.dirname(script_dir)
     return script_dir
+
+
+def get_settings_dir():
+    """Cartella dati utente persistente per le impostazioni dell'applicazione."""
+    home = os.path.expanduser("~")
+    if sys.platform == "win32":
+        base = os.environ.get("APPDATA", os.path.join(home, "AppData", "Roaming"))
+    elif sys.platform == "darwin":
+        base = os.path.join(home, "Library", "Application Support")
+    else:
+        base = os.environ.get("XDG_CONFIG_HOME", os.path.join(home, ".config"))
+    return os.path.join(base, "YTDownloader")
 
 
 def get_current_version():
@@ -52,26 +75,40 @@ def load_theme(app):
         pass
 
 
-# Domini di piattaforme note per usare DRM (Widevine/PlayReady) che yt-dlp
-# non è in grado di decifrare: il download da questi siti non è supportato.
-DRM_PROTECTED_DOMAINS = ["netflix.com", "primevideo.com", "amazon.com/gp/video", "amazon.it/gp/video"]
-
-
 def is_drm_protected_url(url):
-    """Verifica se l'URL appartiene a una piattaforma con DRM non supportata (es. Netflix, Amazon Prime Video)."""
-    lowered = url.lower()
-    if any(domain in lowered for domain in DRM_PROTECTED_DOMAINS):
-        return True
-    return "amazon." in lowered and "primevideo" in lowered
+    """Verifica se l'URL appartiene a una piattaforma con DRM non supportato (es. Netflix, Amazon Prime Video)."""
+    try:
+        host = urlparse(url).netloc.lower()
+    except ValueError:
+        return False
+    return any(host == domain or host.endswith("." + domain) for domain in DRM_PROTECTED_DOMAINS)
 
 
 def check_yt_dlp_installed():
     """Controlla se yt-dlp è installato e accessibile."""
-    try:
-        result = subprocess.run(["yt-dlp", "--version"], capture_output=True, text=True)
-        return result.returncode == 0
-    except FileNotFoundError:
-        return False
+    return shutil.which("yt-dlp") is not None
+
+
+def is_newer_version(remote, current):
+    """Confronta due versioni semantiche: True se remote è più recente di current."""
+    def parse(version):
+        parts = []
+        for token in version.split("."):
+            digits = ""
+            for ch in token:
+                if ch.isdigit():
+                    digits += ch
+                else:
+                    break
+            parts.append(int(digits) if digits else 0)
+        return tuple(parts)
+
+    remote_parts = parse(remote)
+    current_parts = parse(current)
+    length = max(len(remote_parts), len(current_parts))
+    remote_parts += (0,) * (length - len(remote_parts))
+    current_parts += (0,) * (length - len(current_parts))
+    return remote_parts > current_parts
 
 
 # --- Thread per il download ---
@@ -81,7 +118,8 @@ class DownloadThread(QThread):
     message_signal = pyqtSignal(str)  # Messaggio di log
     finished_signal = pyqtSignal(str, bool)  # (URL, successo)
 
-    def __init__(self, url, output_path, format_type, quality, playlist=False, subtitles=False, sub_lang="", cookies_path="", custom_args=""):
+    def __init__(self, url, output_path, format_type, quality,
+                 playlist=False, subtitles=False, sub_lang="", cookies_path="", custom_args=""):
         super().__init__()
         self.url = url
         self.output_path = output_path
@@ -130,28 +168,29 @@ class DownloadThread(QThread):
 
     def _build_args(self):
         command = [
-            "-o", f"{self.output_path}/%(title)s.%(ext)s",
+            "-o", os.path.join(self.output_path, "%(title)s.%(ext)s"),
             "--format", self._get_format(),
-            "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-            "--no-check-certificate",
+            "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                            "AppleWebKit/537.36 (KHTML, like Gecko) "
+                            "Chrome/91.0.4472.124 Safari/537.36",
             "--progress-template", "%(progress._percent_str)s",
             "--newline",
         ]
 
         if self.playlist:
             command.append("--yes-playlist")
-        if self.subtitles and self.sub_lang:
+        if self.subtitles and self.sub_lang and self.format_type != "Audio":
             command.extend(["--write-subs", "--sub-lang", self.sub_lang])
         if self.cookies_path:
             command.extend(["--cookies", self.cookies_path])
         if self.custom_args:
-            command.extend(self.custom_args.split())
+            command.extend(shlex.split(self.custom_args))
         command.append(self.url)
         return command
 
     def _emit_progress(self, line):
         try:
-            percent = int(float(line.rstrip('%')))
+            percent = int(float(line.rstrip("%").strip()))
             self.progress_signal.emit(percent, self.url)
         except ValueError:
             pass
@@ -168,11 +207,6 @@ class DownloadThread(QThread):
             return "bestaudio/best"
         else:
             return "best"
-
-    def cancel(self):
-        self._is_cancelled = True
-        if self._process and self._process.poll() is None:
-            self._process.terminate()
 
 
 # --- Thread per il controllo aggiornamenti ---
@@ -192,7 +226,7 @@ class UpdateCheckThread(QThread):
             remote_version = data.get("tag_name", "").lstrip("v")
             changelog = data.get("body", "")
             current_version = get_current_version()
-            is_newer = remote_version and remote_version != current_version
+            is_newer = bool(remote_version) and is_newer_version(remote_version, current_version)
             self.result_signal.emit(is_newer, remote_version, changelog)
         except Exception as exc:
             self.result_signal.emit(False, "", str(exc))
@@ -221,6 +255,7 @@ class YTDLPGUI(QMainWindow):
         self.active_threads = {}
         self.history = []
         self._update_thread = None
+        self._download_counter = 0
 
         self._load_settings()
         self._create_menu()
@@ -234,7 +269,7 @@ class YTDLPGUI(QMainWindow):
                 self.default_output = settings.get("output_path", get_default_downloads_path())
                 self.default_quality = settings.get("quality", "Alta")
                 self.default_format = settings.get("format", "Video")
-        except (FileNotFoundError, json.JSONDecodeError):
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
             self.default_output = get_default_downloads_path()
             self.default_quality = "Alta"
             self.default_format = "Video"
@@ -245,12 +280,16 @@ class YTDLPGUI(QMainWindow):
             "quality": self.quality_combo.currentText(),
             "format": self.format_combo.currentText(),
         }
-        with open(self._settings_path(), "w") as f:
-            json.dump(settings, f)
+        try:
+            os.makedirs(get_settings_dir(), exist_ok=True)
+            with open(self._settings_path(), "w") as f:
+                json.dump(settings, f)
+        except OSError:
+            pass
 
     @staticmethod
     def _settings_path():
-        return os.path.join(get_app_dir(), "settings.json")
+        return os.path.join(get_settings_dir(), "settings.json")
 
     def _create_menu(self):
         help_menu = self.menuBar().addMenu("&Aiuto")
@@ -326,7 +365,7 @@ class YTDLPGUI(QMainWindow):
         url_layout.addRow("URL:", self.url_input)
 
         self.format_combo = QComboBox()
-        self.format_combo.addItems(["Video", "Audio", "Entrambi"])
+        self.format_combo.addItems(["Video", "Audio"])
         self.format_combo.setCurrentText(self.default_format)
         url_layout.addRow("Formato:", self.format_combo)
 
@@ -398,8 +437,9 @@ class YTDLPGUI(QMainWindow):
         self.layout.addWidget(self.progress_bar)
 
         log_label = QLabel("Log:")
-        self.log_output = QTextEdit()
+        self.log_output = QPlainTextEdit()
         self.log_output.setReadOnly(True)
+        self.log_output.setMaximumBlockCount(5000)
         self.layout.addWidget(log_label)
         self.layout.addWidget(self.log_output)
 
@@ -469,7 +509,7 @@ class YTDLPGUI(QMainWindow):
             "custom_args": self.custom_args_input.text().strip(),
         })
 
-        self.log_output.append(f"Aggiunto alla coda: {url}")
+        self.log_output.appendPlainText(f"Aggiunto alla coda: {url}")
         self.url_input.clear()
 
         # Se non ci sono download attivi, avvia il primo della coda
@@ -484,6 +524,9 @@ class YTDLPGUI(QMainWindow):
         download = self.download_queue.pop(0)
         self.queue_list.takeItem(0)
 
+        self._download_counter += 1
+        download_id = self._download_counter
+
         thread = DownloadThread(
             url=download["url"],
             output_path=download["output_path"],
@@ -497,35 +540,41 @@ class YTDLPGUI(QMainWindow):
         )
         thread.progress_signal.connect(self._update_progress)
         thread.message_signal.connect(self._update_log)
-        thread.finished_signal.connect(self._on_download_finished)
+        thread.finished_signal.connect(
+            lambda url, success, tid=download_id: self._on_download_finished(tid, url, success)
+        )
 
-        self.active_threads[download["url"]] = thread
+        self.active_threads[download_id] = thread
         thread.start()
-        self.log_output.append(f"Avviato download: {download['url']}")
+        self.log_output.appendPlainText(f"Avviato download: {download['url']}")
 
-    def _on_download_finished(self, url, success):
-        if url in self.active_threads:
-            del self.active_threads[url]
+    def _on_download_finished(self, download_id, url, success):
+        thread = self.active_threads.pop(download_id, None)
+        if thread is not None:
+            thread.wait()
         if success:
             self._update_log(f"Download completato: {url}")
         else:
             self._update_log(f"Download non riuscito o annullato: {url}")
         self._start_next_download()
 
-    def _cancel_download(self, url):
-        if url in self.active_threads:
-            self.active_threads[url].cancel()
-            self._update_log(f"Download annullato: {url}")
+    def _cancel_download(self, download_id):
+        thread = self.active_threads.get(download_id)
+        if thread is not None:
+            thread.cancel()
+            self._update_log(f"Download annullato: {thread.url}")
 
     def _update_progress(self, percent, url):
         self.progress_bar.setValue(percent)
 
     def _update_log(self, message):
-        self.log_output.append(message)
+        self.log_output.appendPlainText(message)
 
     def _cancel_all_downloads(self):
-        for url in list(self.active_threads.keys()):
-            self._cancel_download(url)
+        for download_id in list(self.active_threads.keys()):
+            self._cancel_download(download_id)
+        for thread in self.active_threads.values():
+            thread.wait(3000)
         self.download_queue.clear()
         self.queue_list.clear()
         self.progress_bar.setValue(0)
@@ -538,20 +587,29 @@ class YTDLPGUI(QMainWindow):
             del self.download_queue[row]
             self._update_log(f"Rimosso dalla coda: {item.text()}")
 
+    def _confirm_exit_with_active_downloads(self):
+        reply = QMessageBox.question(
+            self,
+            "Download in corso",
+            "Ci sono download attivi. Vuoi davvero uscire?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        return reply == QMessageBox.StandardButton.Yes
+
     def _exit_app(self):
+        if self.active_threads and not self._confirm_exit_with_active_downloads():
+            return
         self._save_settings()
-        if self.active_threads:
-            reply = QMessageBox.question(
-                self,
-                "Download in corso",
-                "Ci sono download attivi. Vuoi davvero uscire?",
-                QMessageBox.Yes | QMessageBox.No
-            )
-            if reply == QMessageBox.Yes:
-                self._cancel_all_downloads()
-                self.close()
-        else:
-            self.close()
+        self._cancel_all_downloads()
+        self.close()
+
+    def closeEvent(self, event):
+        if self.active_threads and not self._confirm_exit_with_active_downloads():
+            event.ignore()
+            return
+        self._save_settings()
+        self._cancel_all_downloads()
+        event.accept()
 
     # --- Drag & Drop ---
     def dragEnterEvent(self, event: QDragEnterEvent):

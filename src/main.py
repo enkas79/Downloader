@@ -13,11 +13,16 @@ from PyQt6.QtWidgets import (
     QGroupBox, QFormLayout
 )
 from PyQt6.QtCore import QThread, pyqtSignal
-from PyQt6.QtGui import QDragEnterEvent, QDropEvent, QIcon, QAction
+from PyQt6.QtGui import QAction, QActionGroup, QDragEnterEvent, QDropEvent, QIcon
 
 # --- Repository GitHub per il controllo aggiornamenti ---
 GITHUB_REPO = "enkas79/downloader"
 APP_AUTHOR = "enkas79"
+
+THEMES = {
+    "dark": "theme_dark.qss",
+    "light": "theme_light.qss",
+}
 
 # Domini di piattaforme note per usare DRM (Widevine/PlayReady) che yt-dlp
 # non è in grado di decifrare: il download da questi siti non è supportato.
@@ -64,15 +69,21 @@ def get_default_downloads_path():
     return os.path.join(os.path.expanduser("~"), "Downloads")
 
 
-def load_theme(app):
-    """Applica il foglio di stile QSS del tema scuro moderno, se presente."""
+def load_theme(app, theme_name="dark"):
+    """Applica il foglio di stile QSS del tema richiesto, se presente."""
     base_dir = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
-    theme_path = os.path.join(base_dir, "theme.qss")
+    theme_file = THEMES.get(theme_name, THEMES["dark"])
+    theme_path = os.path.join(base_dir, theme_file)
     try:
         with open(theme_path, "r") as f:
             app.setStyleSheet(f.read())
     except FileNotFoundError:
         pass
+
+
+def available_themes():
+    """Restituisce i nomi interni dei temi disponibili."""
+    return list(THEMES.keys())
 
 
 def is_drm_protected_url(url):
@@ -260,6 +271,7 @@ class YTDLPGUI(QMainWindow):
         self._load_settings()
         self._create_menu()
         self._create_ui()
+        load_theme(QApplication.instance(), self.current_theme)
         self._check_updates(manual=False)
 
     def _load_settings(self):
@@ -273,12 +285,16 @@ class YTDLPGUI(QMainWindow):
             self.default_output = get_default_downloads_path()
             self.default_quality = "Alta"
             self.default_format = "Video"
+        self.current_theme = settings.get("theme", "dark") if isinstance(settings, dict) else "dark"
+        if self.current_theme not in THEMES:
+            self.current_theme = "dark"
 
     def _save_settings(self):
         settings = {
             "output_path": self.output_input.text(),
             "quality": self.quality_combo.currentText(),
             "format": self.format_combo.currentText(),
+            "theme": self.current_theme,
         }
         try:
             os.makedirs(get_settings_dir(), exist_ok=True)
@@ -292,6 +308,20 @@ class YTDLPGUI(QMainWindow):
         return os.path.join(get_settings_dir(), "settings.json")
 
     def _create_menu(self):
+        view_menu = self.menuBar().addMenu("&Visualizza")
+
+        self._theme_group = QActionGroup(self)
+        self._theme_group.setExclusive(True)
+        self._theme_actions = {}
+        theme_labels = {"dark": "Tema scuro", "light": "Tema chiaro"}
+        for theme_name in available_themes():
+            action = QAction(theme_labels.get(theme_name, theme_name), self, checkable=True)
+            action.setChecked(theme_name == self.current_theme)
+            action.triggered.connect(lambda checked, name=theme_name: self._switch_theme(name))
+            self._theme_group.addAction(action)
+            view_menu.addAction(action)
+            self._theme_actions[theme_name] = action
+
         help_menu = self.menuBar().addMenu("&Aiuto")
 
         about_action = QAction("Informazioni", self)
@@ -305,6 +335,16 @@ class YTDLPGUI(QMainWindow):
         guide_action = QAction("Guida", self)
         guide_action.triggered.connect(self._show_guide)
         help_menu.addAction(guide_action)
+
+    def _switch_theme(self, theme_name):
+        """Cambia il tema grafico applicato e aggiorna il menu."""
+        if theme_name not in THEMES:
+            return
+        self.current_theme = theme_name
+        load_theme(QApplication.instance(), theme_name)
+        action = self._theme_actions.get(theme_name)
+        if action is not None:
+            action.setChecked(True)
 
     def _show_about(self):
         QMessageBox.about(

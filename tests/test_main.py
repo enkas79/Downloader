@@ -138,3 +138,22 @@ def test_is_newer_version_false_on_same():
 def test_is_newer_version_handles_different_lengths():
     assert main.is_newer_version("1.0.1", "1.0")
     assert not main.is_newer_version("1.0", "1.0.1")
+
+
+def test_available_themes_contains_dark_and_light():
+    themes = main.available_themes()
+    assert "dark" in themes
+    assert "light" in themes
+
+
+def test_theme_files_exist():
+    src_dir = os.path.dirname(main.__file__)
+    for theme_file in main.THEMES.values():
+        assert os.path.isfile(os.path.join(src_dir, theme_file))
+
+
+def test_load_theme_applies_stylesheet(qapp):
+    main.load_theme(qapp, "light")
+    assert "background-color" in qapp.styleSheet()
+    main.load_theme(qapp, "dark")
+    assert "background-color" in qapp.styleSheet()
